@@ -12,20 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from functools import partial
 import argparse
-import sys
 import os
-import random
-import time
+from functools import partial
 
 import numpy as np
 import paddle
-import paddle.nn.functional as F
 import paddlenlp as ppnlp
+from paddlenlp.data import Tuple, Pad
 from paddlenlp.datasets import load_dataset
-from paddlenlp.data import Stack, Tuple, Pad
 
+import preprocess
+from misspelling import kenlm_same
 from data import create_dataloader, read_text_pair, convert_example
 from model import QuestionMatching
 
@@ -34,11 +32,15 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--input_file", type=str, required=True, help="The full path of input file")
 parser.add_argument("--result_file", type=str, required=True, help="The result file name")
 parser.add_argument("--params_path", type=str, required=True, help="The path to model parameters to be loaded.")
-parser.add_argument("--max_seq_length", default=256, type=int, help="The maximum total input sequence length after tokenization. "
-    "Sequences longer than this will be truncated, sequences shorter will be padded.")
+parser.add_argument("--max_seq_length", default=256, type=int,
+                    help="The maximum total input sequence length after tokenization. "
+                         "Sequences longer than this will be truncated, sequences shorter will be padded.")
 parser.add_argument("--batch_size", default=32, type=int, help="Batch size per GPU/CPU for training.")
-parser.add_argument('--device', choices=['cpu', 'gpu'], default="gpu", help="Select which device to train model, defaults to gpu.")
+parser.add_argument('--device', choices=['cpu', 'gpu'], default="gpu",
+                    help="Select which device to train model, defaults to gpu.")
 args = parser.parse_args()
+
+
 # yapf: enable
 
 
@@ -73,7 +75,7 @@ def predict(model, data_loader):
         return batch_logits
 
 
-if __name__ == "__main__":
+def do_predict():
     paddle.set_device(args.device)
 
     pretrained_model = ppnlp.transformers.ErnieGramModel.from_pretrained(
@@ -114,16 +116,50 @@ if __name__ == "__main__":
 
     y_probs = predict(model, test_data_loader)
     y_preds = np.argmax(y_probs, axis=1)
-    
-    with open(args.result_file, 'w', encoding="utf-8") as f:
-        with open('test_out.txt','r') as o:
-            k = int(o.readline())
-            for i,y_pred in enumerate(y_preds):
-                if i==k:
-                    f.write(str(1) + "\n")
-                    try:
-                        k = int(o.readline())
-                    except:
-                        pass
-                else:
-                    f.write(str(y_pred) + "\n")
+    print("y_preds size == ", y_preds.size)
+    with open(args.result_file, 'w', encoding="utf-8") as f,\
+            open(preprocess.kenlm_correct_same_line_number_file, 'r') as kenlm_f, \
+            open(preprocess.mac_bert_correct_same_line_number_file, 'r') as mac_bert_f, \
+            open(preprocess.xpinyin_same_line_number_file, 'r') as xpinyin_f, \
+            open(preprocess.lower_same_line_number_file, 'r') as lower_f, \
+            open(preprocess.ppinyin_same_line_number_file, 'r') as ppinyin_f:
+        def nextline(f):
+            try:
+                return int(f.readline())
+            except:
+                return None
+
+        class CorrectedLines:
+            def __init__(self, file):
+                self.file = file
+                self.current = nextline(file)
+
+            def forward(self):
+                self.current = nextline(self.file)
+
+        kenlm_correct_lines = CorrectedLines(kenlm_f)
+        xpinyin_same_lines = CorrectedLines(xpinyin_f)
+        ppinyin_same_lines = CorrectedLines(ppinyin_f)
+        # mac_bert_same_lines = CorrectedLines(mac_bert_f)
+        lower_same_lines = CorrectedLines(lower_f)
+        corrected_lines = [
+            kenlm_correct_lines,
+            xpinyin_same_lines,
+            ppinyin_same_lines,
+            # mac_bert_same_lines,
+            lower_same_lines
+        ]
+        for i, y_pred in enumerate(y_preds):
+            corrected_currents = [c.current for c in corrected_lines]
+            if i in corrected_currents:
+                print("found same corrected line: ", i, " corrected_currents = ", corrected_currents)
+                f.write("1\n")
+                for cl in corrected_lines:
+                    if cl.current == i:
+                        cl.forward()
+            else:
+                f.write(str(y_pred) + "\n")
+
+
+if __name__ == "__main__":
+    do_predict()
